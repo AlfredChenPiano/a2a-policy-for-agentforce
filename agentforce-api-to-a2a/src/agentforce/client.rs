@@ -97,6 +97,18 @@ pub struct StartSessionResponse {
 #[derive(Debug, Clone, Serialize)]
 struct SendMessageRequest<'a> {
     message: SendMessageBody<'a>,
+    /// Optional session variables passed through verbatim from the inbound
+    /// A2A message. Sits alongside `message` at the top level of the request
+    /// body per the Agents API contract. Omitted entirely when empty so the
+    /// no-variables request shape is unchanged.
+    #[serde(skip_serializing_if = "slice_is_empty")]
+    variables: &'a [Variable],
+}
+
+/// `skip_serializing_if` predicate for a borrowed slice field. serde hands the
+/// closure `&&[Variable]`, so we need our own helper rather than `<[_]>::is_empty`.
+fn slice_is_empty(v: &&[Variable]) -> bool {
+    v.is_empty()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -106,6 +118,24 @@ struct SendMessageBody<'a> {
     #[serde(rename = "sequenceId")]
     sequence_id: u32,
     text: &'a str,
+}
+
+/// A single Agentforce session variable (`{ name, type, value }`).
+///
+/// This mirrors the Agents API `variables` element exactly and is reused on
+/// the inbound A2A `Message` so a variable round-trips straight through
+/// without reshaping. `value` is kept as raw JSON so non-text variable types
+/// (numbers, booleans, objects) survive the pass-through.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Variable {
+    pub name: String,
+    #[serde(rename = "type", default = "default_variable_type")]
+    pub kind: String,
+    pub value: serde_json::Value,
+}
+
+fn default_variable_type() -> String {
+    "Text".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -280,6 +310,7 @@ impl AgentforceClient {
         session_id: &str,
         text: &str,
         sequence_id: u32,
+        variables: &[Variable],
         now_unix: u64,
     ) -> Result<SendMessageResponse, ClientError> {
         let body_struct = SendMessageRequest {
@@ -288,6 +319,7 @@ impl AgentforceClient {
                 sequence_id,
                 text,
             },
+            variables,
         };
         let body =
             serde_json::to_vec(&body_struct).map_err(|e| ClientError::BadJson(e.to_string()))?;
@@ -477,12 +509,62 @@ mod tests {
                 sequence_id: 7,
                 text: "hi",
             },
+            variables: &[],
         };
         let json: serde_json::Value =
             serde_json::from_slice(&serde_json::to_vec(&body).unwrap()).unwrap();
         assert_eq!(json["message"]["type"], "Text");
         assert_eq!(json["message"]["sequenceId"], 7);
         assert_eq!(json["message"]["text"], "hi");
+        // No variables supplied -> the key is omitted entirely.
+        assert!(json.get("variables").is_none());
+    }
+
+    #[test]
+    fn send_message_request_serializes_variables_alongside_message() {
+        let vars = vec![Variable {
+            name: "user_email".into(),
+            kind: "Text".into(),
+            value: serde_json::json!("abc.efg@xyz.com"),
+        }];
+        let body = SendMessageRequest {
+            message: SendMessageBody {
+                kind: "Text",
+                sequence_id: 1,
+                text: "who am I?",
+            },
+            variables: &vars,
+        };
+        let json: serde_json::Value =
+            serde_json::from_slice(&serde_json::to_vec(&body).unwrap()).unwrap();
+        // `variables` is a top-level sibling of `message`, not nested inside it.
+        assert_eq!(json["message"]["text"], "who am I?");
+        assert_eq!(json["variables"][0]["name"], "user_email");
+        assert_eq!(json["variables"][0]["type"], "Text");
+        assert_eq!(json["variables"][0]["value"], "abc.efg@xyz.com");
+    }
+
+    #[test]
+    fn variable_deserializes_and_defaults_type_to_text() {
+        // Full shape round-trips.
+        let v: Variable = serde_json::from_value(serde_json::json!({
+            "name": "user_email",
+            "type": "Text",
+            "value": "abc.efg@xyz.com"
+        }))
+        .unwrap();
+        assert_eq!(v.name, "user_email");
+        assert_eq!(v.kind, "Text");
+        assert_eq!(v.value, serde_json::json!("abc.efg@xyz.com"));
+
+        // Missing `type` falls back to "Text".
+        let v: Variable = serde_json::from_value(serde_json::json!({
+            "name": "count",
+            "value": 3
+        }))
+        .unwrap();
+        assert_eq!(v.kind, "Text");
+        assert_eq!(v.value, serde_json::json!(3));
     }
 
     #[test]

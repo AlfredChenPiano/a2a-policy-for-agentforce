@@ -79,7 +79,12 @@ fn message_send_happy_path() {
         )
     });
 
+    // Capture the outbound Agents API /messages request body so we can assert
+    // the top-level A2A variables were forwarded verbatim.
+    let messages_body: Rc<RefCell<Option<serde_json::Value>>> = Rc::new(RefCell::new(None));
+
     let calls_for_af = calls.clone();
+    let messages_body_for_af = messages_body.clone();
     let agentforce = RouterBackend::new(move |req| {
         let path = header(&req, ":path").unwrap_or_default();
         let method = header(&req, ":method").unwrap_or_default();
@@ -90,6 +95,9 @@ fn message_send_happy_path() {
             return json(200, r#"{"sessionId":"abc-123"}"#);
         }
         if method == "POST" && path.contains("/sessions/abc-123/messages") {
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(req.body()) {
+                *messages_body_for_af.borrow_mut() = Some(v);
+            }
             return json(
                 200,
                 r#"{"messages":[{"id":"m1","type":"Inform","message":"Hello!"}]}"#,
@@ -136,19 +144,24 @@ fn message_send_happy_path() {
         )
         .with_entrypoint(configure);
 
-    // Issue an A2A message/send.
+    // Issue an A2A message/send with top-level session variables and a
+    // string-encoded `blocking` flag (both as seen from real clients).
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "message/send",
         "params": {
+            "configuration": { "blocking": "true" },
             "message": {
                 "kind": "message",
                 "messageId": "u1",
                 "role": "user",
                 "parts": [{"kind":"text","text":"hi"}]
             }
-        }
+        },
+        "variables": [
+            { "name": "user_email", "type": "Text", "value": "abc.efg@xyz.com" }
+        ]
     })
     .to_string();
     let req = UnitHttpRequest::post()
@@ -183,4 +196,15 @@ fn message_send_happy_path() {
             .any(|s| s.contains("af POST") && s.contains("/messages")),
         "{log:?}"
     );
+
+    // The top-level A2A variables must have been forwarded to the Agents API
+    // /messages body as a sibling of `message`, unchanged.
+    let sent = messages_body
+        .borrow()
+        .clone()
+        .expect("messages body should have been captured");
+    assert_eq!(sent["message"]["text"], "hi");
+    assert_eq!(sent["variables"][0]["name"], "user_email");
+    assert_eq!(sent["variables"][0]["type"], "Text");
+    assert_eq!(sent["variables"][0]["value"], "abc.efg@xyz.com");
 }

@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::agentforce::client::Variable;
+
 /// JSON-RPC 2.0 protocol version literal.
 pub const JSONRPC_VERSION: &str = "2.0";
 
@@ -38,6 +40,12 @@ pub struct JsonRpcRequest {
     pub method: String,
     #[serde(default)]
     pub params: Option<serde_json::Value>,
+    /// Agentforce session variables. These arrive at the top level of the
+    /// A2A envelope (a sibling of `params`, not inside the message) and are
+    /// forwarded verbatim to the Agents API `/messages` request. Empty for
+    /// any request that doesn't carry them.
+    #[serde(default)]
+    pub variables: Vec<Variable>,
 }
 
 /// Outgoing success response. Uses an explicit shape rather than
@@ -146,6 +154,36 @@ mod tests {
         let req = parse_request(body).unwrap();
         assert_eq!(req.method, "message/send");
         assert_eq!(req.id, Some(serde_json::json!(1)));
+        // Absent `variables` -> empty, never an error.
+        assert!(req.variables.is_empty());
+    }
+
+    #[test]
+    fn parse_captures_top_level_variables() {
+        let body = br#"{
+            "jsonrpc": "2.0",
+            "id": "67e28d92",
+            "method": "message/send",
+            "params": {
+                "message": {
+                    "kind": "message",
+                    "messageId": "0ebc2b97",
+                    "role": "user",
+                    "parts": [{"kind":"text","text":"who am I?"}]
+                }
+            },
+            "variables": [
+                {"name":"user_email","type":"Text","value":"abc.efg@xyz.com"}
+            ]
+        }"#;
+        let req = parse_request(body).unwrap();
+        assert_eq!(req.variables.len(), 1);
+        assert_eq!(req.variables[0].name, "user_email");
+        assert_eq!(req.variables[0].kind, "Text");
+        assert_eq!(
+            req.variables[0].value,
+            serde_json::json!("abc.efg@xyz.com")
+        );
     }
 
     #[test]

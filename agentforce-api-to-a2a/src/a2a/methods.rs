@@ -99,10 +99,12 @@ impl Dispatcher {
         let seq = meta.next_sequence(now_unix);
         self.store.put_meta(http, &task_id, &meta, now_unix).await;
 
-        // Sync send.
+        // Sync send. Session variables arrive at the top level of the A2A
+        // envelope (sibling of `params`) and are forwarded verbatim to the
+        // Agents API alongside the message body.
         let response = self
             .client
-            .send_message(http, &task_id, &text, seq, now_unix)
+            .send_message(http, &task_id, &text, seq, &request.variables, now_unix)
             .await
             .map_err(client_error_to_rpc(id.clone()))?;
 
@@ -331,6 +333,7 @@ mod tests {
             id: Some(serde_json::json!(1)),
             method: "tasks/get".into(),
             params: None,
+            variables: Vec::new(),
         };
         let err: JsonRpcError = require_params::<TaskIdParams>(&req).unwrap_err();
         assert_eq!(err.error.code, INVALID_PARAMS);
@@ -343,6 +346,7 @@ mod tests {
             id: Some(serde_json::json!(1)),
             method: "tasks/get".into(),
             params: Some(serde_json::json!({ "wrongField": 1 })),
+            variables: Vec::new(),
         };
         let err: JsonRpcError = require_params::<TaskIdParams>(&req).unwrap_err();
         assert_eq!(err.error.code, INVALID_PARAMS);
@@ -355,6 +359,7 @@ mod tests {
             id: Some(serde_json::json!(1)),
             method: "tasks/get".into(),
             params: Some(serde_json::json!({ "id": "task-1" })),
+            variables: Vec::new(),
         };
         let p: TaskIdParams = require_params(&req).unwrap();
         assert_eq!(p.id, "task-1");
