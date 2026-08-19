@@ -28,6 +28,70 @@ connected-mode Flex Gateway WASM body-state outbound trap; see [`ROADMAP.md`](RO
 for the underlying issue.
 
 
+## Passing variables to the Agentforce agent
+
+The policy can forward **Agentforce session variables** to the agent. Variables let you pass
+contextual values (for example, the caller's email) that the agent can reference in its
+instructions, actions, and grounding — see the Salesforce reference,
+[Agent API Variables](https://developer.salesforce.com/docs/ai/agentforce/guide/agent-api-variables.html).
+
+Variables arrive at the **top level of the A2A JSON-RPC envelope** — a sibling of `params`,
+not inside the message — and the policy copies them verbatim onto the outgoing
+`POST /sessions/{id}/messages` request body, alongside `message`. When no `variables` array
+is present, the outgoing request is unchanged (the key is omitted entirely).
+
+Because A2A clients don't natively send a `variables` array, the recommended pattern is to
+inject it upstream with a DataWeave transformation and then let the A2A policy pick it up.
+
+### 1. Add a DataWeave body-transformation policy *before* the A2A policy
+
+Configure a **DataWeave body transformation** policy that appends a `variables` array to the
+incoming payload. This example promotes a `user_email` request header into a variable:
+
+```dataweave
+%dw 2.0
+output application/json
+---
+payload ++ {
+    "variables": [
+       {
+            "name": "user_email",
+            "type": "Text",
+            "value": attributes.headers['user_email']
+        }
+    ]
+}
+```
+
+### 2. Add the `agentforce-api-to-a2a` policy *after* the transformation
+
+Order matters: the transformation must run first so the `variables` array is present on the
+payload the A2A policy receives. The policy extracts `variables` from the incoming envelope
+and adds them to the outgoing message sent to the agent's `/messages` endpoint. For example:
+
+```json
+{
+  "message": {
+    "sequenceId": 1,
+    "type": "Text",
+    "text": "who am I?"
+  },
+  "variables": [
+    {
+      "name": "user_email",
+      "type": "Text",
+      "value": "abc.efg@xyz.com"
+    }
+  ]
+}
+```
+
+### 3. Variables reach the Agentforce agent
+
+agenforce-api-to-a2a policy propagates the variables to the agent as described in the Salesforce documentation
+[Agent API Variables](https://developer.salesforce.com/docs/ai/agentforce/guide/agent-api-variables.html).
+
+
 ## Deploying to your own org
 
 Step-by-step. Skip steps you already have set up.
