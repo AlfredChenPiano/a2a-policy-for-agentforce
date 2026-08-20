@@ -165,8 +165,36 @@ pub struct MessageSendConfiguration {
     #[serde(default)]
     #[serde(rename = "historyLength")]
     pub history_length: Option<u32>,
-    #[serde(default)]
+    /// Some A2A clients send `blocking` as a JSON string (`"true"`) rather
+    /// than a bool. Accept either so the whole `params` parse doesn't fail on
+    /// a field we don't otherwise act on (v1 always does a sync send).
+    #[serde(default, deserialize_with = "de_lenient_bool")]
     pub blocking: Option<bool>,
+}
+
+/// Deserialize an optional bool that may arrive as a real bool, a
+/// string (`"true"`/`"false"`, case-insensitive), or null/absent.
+fn de_lenient_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum BoolOrString {
+        Bool(bool),
+        Str(String),
+    }
+    match Option::<BoolOrString>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(BoolOrString::Bool(b)) => Ok(Some(b)),
+        Some(BoolOrString::Str(s)) => match s.trim().to_ascii_lowercase().as_str() {
+            "true" => Ok(Some(true)),
+            "false" => Ok(Some(false)),
+            other => Err(serde::de::Error::custom(format!(
+                "invalid boolean string for `blocking`: {other:?}"
+            ))),
+        },
+    }
 }
 
 /// A2A `TaskQueryParams` (spec §7.3.1).
@@ -296,6 +324,22 @@ mod tests {
         });
         let p: MessageSendParams = serde_json::from_value(body).unwrap();
         assert_eq!(p.message.role, "user");
+        assert_eq!(p.configuration.unwrap().blocking, Some(true));
+    }
+
+    #[test]
+    fn message_send_params_accepts_string_blocking() {
+        // Mirrors the real inbound payload, which sends `blocking` as a string.
+        let body = serde_json::json!({
+            "message": {
+                "kind": "message",
+                "messageId": "0ebc2b97",
+                "role": "user",
+                "parts": [{"kind":"text","text":"who am I?"}]
+            },
+            "configuration": { "blocking": "true" }
+        });
+        let p: MessageSendParams = serde_json::from_value(body).unwrap();
         assert_eq!(p.configuration.unwrap().blocking, Some(true));
     }
 }
